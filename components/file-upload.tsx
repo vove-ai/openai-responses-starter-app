@@ -26,12 +26,17 @@ interface FileUploadProps {
   onUnlinkStore: () => void;
 }
 
+interface FileWithMetadata {
+  file: File;
+  metadata: string;
+}
+
 export default function FileUpload({
   vectorStoreId,
   onAddStore,
   onUnlinkStore,
 }: FileUploadProps) {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<FileWithMetadata[]>([]);
   const [newStoreName, setNewStoreName] = useState<string>("Default store");
   const [uploading, setUploading] = useState<boolean>(false);
   const [dialogOpen, setDialogOpen] = useState<boolean>(false);
@@ -65,19 +70,21 @@ export default function FileUpload({
   };
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    if (acceptedFiles.length > 0) {
-      setFile(acceptedFiles[0]);
-    }
+    const newFiles = acceptedFiles.map(file => ({
+      file,
+      metadata: "{}"
+    }));
+    setFiles(prev => [...prev, ...newFiles]);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    multiple: false,
+    multiple: true,
     accept: acceptedFileTypes,
   });
 
-  const removeFile = () => {
-    setFile(null);
+  const removeFile = (index: number) => {
+    setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
@@ -89,43 +96,41 @@ export default function FileUpload({
     return btoa(binary);
   };
 
+  const updateFileMetadata = (index: number, metadata: string) => {
+    setFiles(prev => prev.map((item, i) => 
+      i === index ? { ...item, metadata } : item
+    ));
+  };
+
+  const validateMetadata = (metadata: string): boolean => {
+    try {
+      JSON.parse(metadata);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!file) {
-      alert("Please select a file to upload.");
+    if (files.length === 0) {
+      alert("Please select at least one file to upload.");
       return;
     }
+
+    // Validate all metadata JSON
+    const invalidMetadata = files.some(({ metadata }) => !validateMetadata(metadata));
+    if (invalidMetadata) {
+      alert("One or more files have invalid metadata JSON format.");
+      return;
+    }
+
     setUploading(true);
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const base64Content = arrayBufferToBase64(arrayBuffer);
-      const fileObject = {
-        name: file.name,
-        content: base64Content,
-      };
-
-      // 1. Upload file
-      const uploadResponse = await fetch("/api/vector_stores/upload_file", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fileObject,
-        }),
-      });
-      if (!uploadResponse.ok) {
-        throw new Error("Error uploading file");
-      }
-      const uploadData = await uploadResponse.json();
-      const fileId = uploadData.id;
-      if (!fileId) {
-        throw new Error("Error getting file ID");
-      }
-      console.log("Uploaded file:", uploadData);
-
       let finalVectorStoreId = vectorStoreId;
 
-      // 2. If no vector store is linked, create one
+      // 1. If no vector store is linked, create one
       if (!vectorStoreId || vectorStoreId === "") {
         const createResponse = await fetch("/api/vector_stores/create_store", {
           method: "POST",
@@ -147,130 +152,168 @@ export default function FileUpload({
 
       onAddStore(finalVectorStoreId);
 
-      // 3. Add file to vector store
-      const addFileResponse = await fetch("/api/vector_stores/add_file", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fileId,
-          vectorStoreId: finalVectorStoreId,
-        }),
-      });
-      if (!addFileResponse.ok) {
-        throw new Error("Error adding file to vector store");
+      // 2. Upload each file and add to vector store
+      for (const { file, metadata } of files) {
+        const arrayBuffer = await file.arrayBuffer();
+        const base64Content = arrayBufferToBase64(arrayBuffer);
+        const fileObject = {
+          name: file.name,
+          content: base64Content,
+          metadata: JSON.parse(metadata),
+        };
+
+        // Upload file
+        const uploadResponse = await fetch("/api/vector_stores/upload_file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fileObject,
+            vectorStoreId: finalVectorStoreId,
+          }),
+        });
+        if (!uploadResponse.ok) {
+          throw new Error(`Error uploading file: ${file.name}`);
+        }
+        const uploadData = await uploadResponse.json();
+        const fileId = uploadData.id;
+        if (!fileId) {
+          throw new Error(`Error getting file ID for: ${file.name}`);
+        }
       }
-      const addFileData = await addFileResponse.json();
-      console.log("Added file to vector store:", addFileData);
-      setFile(null);
+
+      setFiles([]);
       setDialogOpen(false);
     } catch (error) {
       console.error("Error during file upload process:", error);
-      alert("There was an error processing your file. Please try again.");
+      alert("There was an error processing your files. Please try again.");
     } finally {
       setUploading(false);
     }
   };
 
   return (
-    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-      <DialogTrigger asChild>
-        <div className="bg-white rounded-full flex items-center justify-center py-1 px-3 border border-zinc-200 gap-1 font-medium text-sm cursor-pointer hover:bg-zinc-50 transition-all">
-          <Plus size={16} />
-          Upload
-        </div>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-[500px] md:max-w-[600px] max-h-[80vh] overflow-y-scrollfrtdtd">
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
-            <DialogTitle>Add files to your vector store</DialogTitle>
-          </DialogHeader>
-          <div className="my-6">
-            {!vectorStoreId || vectorStoreId === "" ? (
-              <div className="flex items-start gap-2 text-sm">
-                <label className="font-medium w-72" htmlFor="storeName">
-                  New vector store name
-                  <div className="text-xs text-zinc-400">
-                    A new store will be created when you upload a file.
-                  </div>
-                </label>
-                <Input
-                  id="storeName"
-                  type="text"
-                  value={newStoreName}
-                  onChange={(e) => setNewStoreName(e.target.value)}
-                  className="border rounded p-2"
-                />
-              </div>
-            ) : (
-              <div className="flex items-center justify-between flex-1 min-w-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="text-sm font-medium w-24 text-nowrap">
-                    Vector store
-                  </div>
-                  <div className="text-zinc-400  text-xs font-mono flex-1 text-ellipsis truncate">
-                    {vectorStoreId}
-                  </div>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <CircleX
-                          onClick={() => onUnlinkStore()}
-                          size={16}
-                          className="cursor-pointer text-zinc-400 mb-0.5 shrink-0 mt-0.5 hover:text-zinc-700 transition-all"
-                        />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>Unlink vector store</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-              </div>
-            )}
+    <div className="flex flex-col gap-2">
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogTrigger asChild>
+          <div className="bg-white rounded-full flex items-center justify-center py-1 px-3 border border-zinc-200 gap-1 font-medium text-sm cursor-pointer hover:bg-zinc-50 transition-all">
+            <Plus size={16} />
+            Upload
           </div>
-          <div className="flex justify-center items-center mb-4 h-[200px]">
-            {file ? (
-              <div className="flex flex-col items-start">
-                <div className="text-zinc-400">Loaded file</div>
-                <div className="flex items-center mt-2">
-                  <div className="text-zinc-900 mr-2">{file.name}</div>
-
-                  <Trash2
-                    onClick={removeFile}
-                    size={16}
-                    className="cursor-pointer text-zinc-900"
+        </DialogTrigger>
+        <DialogContent className="sm:max-w-[500px] md:max-w-[600px] max-h-[80vh] overflow-y-scroll">
+          <form onSubmit={handleSubmit}>
+            <DialogHeader>
+              <DialogTitle>Add files to your vector store</DialogTitle>
+            </DialogHeader>
+            <div className="my-6">
+              {!vectorStoreId || vectorStoreId === "" ? (
+                <div className="flex items-start gap-2 text-sm">
+                  <label className="font-medium w-72" htmlFor="storeName">
+                    New vector store name
+                    <div className="text-xs text-zinc-400">
+                      A new store will be created when you upload files.
+                    </div>
+                  </label>
+                  <Input
+                    id="storeName"
+                    type="text"
+                    value={newStoreName}
+                    onChange={(e) => setNewStoreName(e.target.value)}
+                    className="border rounded p-2"
                   />
                 </div>
-              </div>
-            ) : (
-              <div className="flex flex-col items-center">
-                <div
-                  {...getRootProps()}
-                  className="p-6 flex items-center justify-center relative focus-visible:outline-0"
-                >
-                  <input {...getInputProps()} />
-                  <div
-                    className={`absolute rounded-full transition-all duration-300 ${
-                      isDragActive
-                        ? "h-56 w-56 bg-zinc-100"
-                        : "h-0 w-0 bg-transparent"
-                    }`}
-                  ></div>
-                  <div className="flex flex-col items-center text-center z-10 cursor-pointer">
-                    <FilePlus2 className="mb-4 size-8 text-zinc-700" />
-                    <div className="text-zinc-700">Upload a file</div>
+              ) : (
+                <div className="flex items-center justify-between flex-1 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="text-sm font-medium w-24 text-nowrap">
+                      Vector store
+                    </div>
+                    <div className="text-zinc-400 text-xs font-mono flex-1 text-ellipsis truncate">
+                      {vectorStoreId}
+                    </div>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <CircleX
+                            onClick={() => onUnlinkStore()}
+                            size={16}
+                            className="cursor-pointer text-zinc-400 mb-0.5 shrink-0 mt-0.5 hover:text-zinc-700 transition-all"
+                          />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Unlink vector store</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
                 </div>
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button type="submit" disabled={uploading}>
-              {uploading ? "Uploading..." : "Add"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+              )}
+            </div>
+            <div className="flex flex-col gap-4 mb-4">
+              {files.length > 0 ? (
+                files.map(({ file, metadata }, index) => (
+                  <div key={index} className="border rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-zinc-900">{file.name}</div>
+                      <Trash2
+                        onClick={() => removeFile(index)}
+                        size={16}
+                        className="cursor-pointer text-zinc-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium" htmlFor={`metadata-${index}`}>
+                        Metadata (JSON)
+                      </label>
+                      <textarea
+                        id={`metadata-${index}`}
+                        value={metadata}
+                        onChange={(e) => updateFileMetadata(index, e.target.value)}
+                        className="w-full h-20 p-2 mt-1 border rounded text-sm font-mono"
+                        placeholder='{"author": "John Doe", "category": "documentation"}'
+                      />
+                      {!validateMetadata(metadata) && (
+                        <div className="text-red-500 text-xs mt-1">Invalid JSON format</div>
+                      )}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="flex flex-col items-center h-[200px]">
+                  <div
+                    {...getRootProps()}
+                    className="p-6 flex items-center justify-center relative focus-visible:outline-0"
+                  >
+                    <input {...getInputProps()} />
+                    <div
+                      className={`absolute rounded-full transition-all duration-300 ${
+                        isDragActive
+                          ? "h-56 w-56 bg-zinc-100"
+                          : "h-0 w-0 bg-transparent"
+                      }`}
+                    ></div>
+                    <div className="flex flex-col items-center text-center z-10 cursor-pointer">
+                      <FilePlus2 className="mb-4 size-8 text-zinc-700" />
+                      <div className="text-zinc-700">Upload files</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button type="submit" disabled={uploading}>
+                {uploading ? "Uploading..." : "Add"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <a 
+        href="/files" 
+        className="bg-white rounded-full flex items-center justify-center py-1 px-3 border border-zinc-200 gap-1 font-medium text-sm cursor-pointer hover:bg-zinc-50 transition-all text-center"
+      >
+        View All Files
+      </a>
+    </div>
   );
 }
