@@ -20,11 +20,11 @@ export async function POST(request: Request) {
 
     try {
       // Ensure we have a valid filename
-      const filename = name || "document.pdf";
+      const filename = name || "document.txt";
       
       // Create a File object that matches OpenAI's requirements
       const fileData = new File([buffer], filename, {
-        type: 'application/pdf',
+        type: 'text/plain',  // Default to text/plain if type is unknown
         lastModified: Date.now()
       });
 

@@ -16,8 +16,9 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  DialogFooter,
 } from "@/components/ui/dialog";
-import { Pencil, Trash2, Save, X } from "lucide-react";
+import { Pencil, Trash2, Save, X, Download, Upload, FileText } from "lucide-react";
 import { toast } from "sonner";
 import useToolsStore from "@/stores/useToolsStore";
 
@@ -55,6 +56,17 @@ export default function FilesPage() {
     startWidth: 0
   });
   const tableRef = useRef<HTMLTableElement>(null);
+  const [importSummary, setImportSummary] = useState<{
+    show: boolean;
+    success: { count: number; files: string[] };
+    errors: { count: number; files: { name: string; error: string }[] };
+    notFound: { count: number; files: string[] };
+  }>({
+    show: false,
+    success: { count: 0, files: [] },
+    errors: { count: 0, files: [] },
+    notFound: { count: 0, files: [] }
+  });
 
   const handleResizeStart = (column: string, e: React.MouseEvent) => {
     setResizing({
@@ -189,9 +201,301 @@ export default function FilesPage() {
     }
   };
 
+  const handleExportFiles = () => {
+    // Create CSV header
+    const headers = ['File Name', 'File ID', 'Size (bytes)', 'Created At', 'Purpose', 'Vector Store ID', 'Attributes'];
+    const csvRows = [headers];
+
+    // Add data rows
+    files.forEach(file => {
+      const row = [
+        file.filename || file.name,
+        file.id,
+        file.bytes.toString(),
+        new Date(file.created_at * 1000).toISOString(),
+        file.purpose,
+        file.vectorStoreId,
+        JSON.stringify(file.attributes)
+      ];
+      csvRows.push(row);
+    });
+
+    // Convert to CSV string
+    const csvContent = csvRows.map(row => 
+      row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')
+    ).join('\n');
+
+    // Create and trigger download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `files_export_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleDownloadTemplate = () => {
+    // Create template CSV with example data that matches the expected format
+    const template = [
+      ['File Name', 'Attributes'],
+      ['AS_3740-2.pdf', '{"title":"australian_standard_waterproofing_of_domestic_wet_areas","documentCategory":"technical_standards","documentType":"australian_standards","year":2021,"version":"","referenceCode":"as_3740_2021","status":"active","jurisdiction":"aus"}'],
+      ['AS_1428.1.pdf', '{"title":"australian_standard_design_for_access_mobility","documentCategory":"technical_standards","documentType":"australian_standards","year":2023,"version":"","referenceCode":"as_1428.1_2023","status":"superseded","jurisdiction":"aus"}'],
+      ['', ''],
+      ['Instructions:', ''],
+      ['1. File Name must match exactly with the file in the database', ''],
+      ['2. Attributes must be valid JSON with the following fields:', ''],
+      ['   - title: descriptive name of the document', ''],
+      ['   - documentCategory: e.g., technical_standards', ''],
+      ['   - documentType: e.g., australian_standards', ''],
+      ['   - year: publication year', ''],
+      ['   - version: version number if applicable', ''],
+      ['   - referenceCode: standard reference code', ''],
+      ['   - status: must be one of: active, draft, superseded, withdrawn, legacy', ''],
+      ['   - jurisdiction: e.g., aus', ''],
+      ['3. Maximum 16 attribute keys allowed', ''],
+      ['4. Attribute keys cannot be longer than 256 characters', ''],
+      ['5. Do not modify the column headers', ''],
+      ['6. Remove example rows before uploading', ''],
+    ];
+
+    // Convert to CSV string
+    const csvContent = template.map(row => 
+      row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')
+    ).join('\n');
+
+    // Create and trigger download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'metadata_template.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const validateMetadata = (attributes: any, fileName: string) => {
+    const requiredFields = ['title', 'documentCategory', 'documentType', 'year', 'version', 'referenceCode', 'status', 'jurisdiction'];
+    const missingFields = requiredFields.filter(field => !(field in attributes));
+    
+    if (missingFields.length > 0) {
+      throw new Error(`File "${fileName}" is missing required fields: ${missingFields.join(', ')}`);
+    }
+
+    if (typeof attributes.year !== 'number') {
+      throw new Error(`File "${fileName}": year must be a number`);
+    }
+
+    const validStatuses = ['active', 'draft', 'superseded', 'withdrawn', 'legacy'];
+    if (!validStatuses.includes(attributes.status)) {
+      throw new Error(`File "${fileName}": status must be one of: ${validStatuses.join(', ')}`);
+    }
+  };
+
+  const handleImportFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const summary = {
+      success: { count: 0, files: [] as string[] },
+      errors: { count: 0, files: [] as { name: string; error: string }[] },
+      notFound: { count: 0, files: [] as string[] }
+    };
+
+    try {
+      const text = await file.text();
+      
+      // Split into lines, handling both \r\n and \n
+      let lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+      
+      // Parse CSV more robustly
+      const parseCSVLine = (line: string) => {
+        const result = [];
+        let cell = '';
+        let inQuotes = false;
+        
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          
+          if (char === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+              // Handle escaped quotes
+              cell += '"';
+              i++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === ',' && !inQuotes) {
+            result.push(cell.trim());
+            cell = '';
+          } else {
+            cell += char;
+          }
+        }
+        
+        result.push(cell.trim());
+        return result;
+      };
+
+      // Parse headers
+      const headers = parseCSVLine(lines[0]);
+      if (headers[0].toLowerCase() !== 'file name' || !headers[1].toLowerCase().includes('attributes')) {
+        throw new Error('Invalid CSV format. Required columns: File Name, Attributes');
+      }
+
+      // Process each data row
+      const updates = [];
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim() || line.startsWith('Instructions:')) continue;
+        
+        const row = parseCSVLine(line);
+        if (row.length < 2) continue;
+
+        const fileName = row[0].replace(/^"|"$/g, '').trim();
+        if (!fileName) continue;
+
+        let attributesStr = row[1].replace(/^"|"$/g, '').trim();
+        
+        try {
+          // Clean up the JSON string
+          attributesStr = attributesStr.replace(/\\"/g, '"')
+                                     .replace(/^"|"$/g, '')
+                                     .replace(/\\/g, '')
+                                     .trim();
+
+          const attributes = JSON.parse(attributesStr);
+          
+          // Validate metadata structure
+          validateMetadata(attributes, fileName);
+          
+          updates.push({ fileName, attributes });
+        } catch (error: unknown) {
+          console.error('Error parsing row:', { line, error });
+          throw new Error(`Invalid JSON in attributes for file "${fileName}": ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      if (updates.length === 0) {
+        throw new Error('No valid data rows found in the CSV file');
+      }
+
+      // Update files in database
+      for (const update of updates) {
+        const file = files.find(f => 
+          f.filename === update.fileName || 
+          f.name === update.fileName ||
+          f.filename === update.fileName + '.pdf' || 
+          f.name === update.fileName + '.pdf'
+        );
+
+        if (!file) {
+          summary.notFound.files.push(update.fileName);
+          summary.notFound.count++;
+          continue;
+        }
+
+        try {
+          const response = await fetch(`/api/vector_stores/files/${file.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              attributes: update.attributes,
+              vectorStoreId: file.vectorStoreId
+            }),
+          });
+
+          if (!response.ok) {
+            summary.errors.files.push({ 
+              name: update.fileName,
+              error: 'Failed to update in database'
+            });
+            summary.errors.count++;
+          } else {
+            summary.success.files.push(update.fileName);
+            summary.success.count++;
+          }
+        } catch (error) {
+          summary.errors.files.push({ 
+            name: update.fileName,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+          summary.errors.count++;
+        }
+      }
+
+      // Refresh files list
+      await fetchFiles();
+      
+      // Show summary dialog
+      setImportSummary({
+        show: true,
+        ...summary
+      });
+
+    } catch (error) {
+      console.error('Error importing files:', error);
+      setImportSummary({
+        show: true,
+        success: { count: 0, files: [] },
+        errors: { 
+          count: 1, 
+          files: [{ 
+            name: 'Import Process', 
+            error: error instanceof Error ? error.message : 'Failed to import files'
+          }] 
+        },
+        notFound: { count: 0, files: [] }
+      });
+    } finally {
+      event.target.value = '';
+    }
+  };
+
   return (
     <div className="container mx-auto py-8">
-      <h1 className="text-2xl font-bold mb-6">Files in Vector Database</h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Files in Vector Database</h1>
+        <div className="flex gap-2">
+          <Button 
+            onClick={handleDownloadTemplate}
+            className="flex items-center gap-2"
+            disabled={!vectorStore?.id}
+            variant="outline"
+          >
+            <FileText size={16} />
+            Download Template
+          </Button>
+          <div className="relative">
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleImportFiles}
+              className="hidden"
+              id="csv-upload"
+            />
+            <Button 
+              onClick={() => document.getElementById('csv-upload')?.click()}
+              className="flex items-center gap-2"
+              disabled={!vectorStore?.id || files.length === 0}
+              variant="outline"
+            >
+              <Upload size={16} />
+              Import Files
+            </Button>
+          </div>
+          <Button 
+            onClick={handleExportFiles}
+            className="flex items-center gap-2"
+            disabled={!vectorStore?.id || files.length === 0}
+          >
+            <Download size={16} />
+            Export Files
+          </Button>
+        </div>
+      </div>
       
       {!vectorStore?.id ? (
         <div className="text-center py-8 text-gray-500">
@@ -364,6 +668,65 @@ export default function FilesPage() {
           </div>
         </div>
       )}
+
+      {/* Import Summary Dialog */}
+      <Dialog open={importSummary.show} onOpenChange={(open) => setImportSummary(prev => ({ ...prev, show: open }))}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Import Summary</DialogTitle>
+          </DialogHeader>
+          <div className="py-4">
+            <div className="space-y-4">
+              {importSummary.success.count > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-green-600 font-medium">
+                    Successfully Updated ({importSummary.success.count} files):
+                  </h3>
+                  <ul className="list-disc pl-5 space-y-1">
+                    {importSummary.success.files.map((file, i) => (
+                      <li key={i} className="text-sm">{file}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {importSummary.notFound.count > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-orange-600 font-medium">
+                    Files Not Found in Database ({importSummary.notFound.count} files):
+                  </h3>
+                  <ul className="list-disc pl-5 space-y-1">
+                    {importSummary.notFound.files.map((file, i) => (
+                      <li key={i} className="text-sm">{file}</li>
+                    ))}
+                  </ul>
+                  <p className="text-sm text-gray-600 mt-2">
+                    These files were skipped. Please check the file names and try again.
+                  </p>
+                </div>
+              )}
+              {importSummary.errors.count > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-red-600 font-medium">
+                    Failed Updates ({importSummary.errors.count} files):
+                  </h3>
+                  <ul className="list-disc pl-5 space-y-1">
+                    {importSummary.errors.files.map((file, i) => (
+                      <li key={i} className="text-sm">
+                        <span className="font-medium">{file.name}</span>: {file.error}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setImportSummary(prev => ({ ...prev, show: false }))}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 } 
